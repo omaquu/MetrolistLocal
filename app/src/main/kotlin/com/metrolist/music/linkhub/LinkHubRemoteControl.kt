@@ -190,6 +190,7 @@ class LinkHubRemoteControl(val service: MusicService) {
     private fun jsonVal(v: Any?): String = when (v) {
         is String -> "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
         is Number, is Boolean -> v.toString()
+        null -> "null"
         else -> "\"" + v.toString() + "\""
     }
 
@@ -206,14 +207,15 @@ class LinkHubRemoteControl(val service: MusicService) {
                 .orEmpty()
                 .take(20)
                 .map { s ->
-                    mapOf(
+                    val m: LinkedHashMap<String, Any?> = linkedMapOf(
                         "videoId" to s.id,
                         "title" to s.title,
-                        "artist" to s.artists.firstOrNull()?.name ?: "",
-                        "album" to (s.album?.name ?: ""),
-                        "duration" to (s.duration ?: 0),
+                        "artist" to s.artists.firstOrNull()?.name,
+                        "album" to s.album?.name,
+                        "duration" to s.duration,
                         "thumbnail" to s.thumbnail,
                     )
+                    m
                 }
             val json = songs.joinToString(",", "[", "]") { item ->
                 item.entries.joinToString(",", "{", "}") { (k, v) -> "\"$k\":${jsonVal(v)}" }

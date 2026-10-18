@@ -613,7 +613,9 @@ class MusicService :
 
         // LinkHub Remote Control — HTTP-ohjaus LinkHub-dashboardilta (aina päällä forkkissa)
         try {
-            if (linkHubRemote == null) linkHubRemote = LinkHubRemoteControl(this)
+            if (linkHubRemote == null) {
+                linkHubRemote = com.metrolist.music.linkhub.LinkHubRemoteControl(this)
+            }
             linkHubRemote?.start()
             // Merkitse että remote on käytetty — pysyy päällä uudelleenkäynnistyksissä
             getSharedPreferences("linkhub_remote", MODE_PRIVATE)
