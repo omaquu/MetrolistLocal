@@ -48,7 +48,6 @@ fun LinkHubRemoteSettings() {
     }
     var tokenDraft by remember { mutableStateOf(token) }
     var portDraft by remember { mutableStateOf(port) }
-    var saved by remember { mutableStateOf(false) }
     val ips = remember { getLocalIpAddresses() }
 
     // Updater
@@ -108,12 +107,13 @@ fun LinkHubRemoteSettings() {
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            var saved by remember { mutableStateOf(false) }
             Button(onClick = {
                 val t = tokenDraft.ifBlank { LinkHubRemoteControl.getOrCreateToken(context) }
                 val p = portDraft.toIntOrNull() ?: LinkHubRemoteControl.DEFAULT_PORT
                 prefs.edit().putString("token", t).putInt("port", p).apply()
                 token = t
-                port = p
+                port = p.toString()
                 saved = true
             }) { Text("Tallenna") }
             if (saved) {
