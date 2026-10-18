@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.time.LocalDate
 import java.util.Properties
 
 val localProperties = Properties()
@@ -48,7 +49,7 @@ android {
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
 
         // MetrolistLinkHub — build-date updateria varten
-        val buildDate = java.time.LocalDate.now().toString()
+        val buildDate = LocalDate.now().toString()
         buildConfigField("String", "LINKHUB_BUILD_DATE", "\"$buildDate\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
