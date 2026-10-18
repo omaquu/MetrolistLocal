@@ -30,13 +30,13 @@ import com.metrolist.music.playback.MusicService
 import com.metrolist.music.playback.queues.YouTubeQueue
 import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.models.MediaMetadata
+import com.metrolist.music.models.toMediaMetadata
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -76,9 +76,6 @@ class LinkHubRemoteControl(val service: MusicService) {
 
     /** Suora pääsy toistimeen — MusicService.player on lateinit ExoPlayer. */
     private val player get() = service.player
-
-    /** Nykyinen toistinstate UI:lle / LinkHubille — päivittyy toistimen kuuntelusta. */
-    val snapshot = MutableStateFlow<Map<String, Any>>(emptyMap())
 
     fun start(port: Int = prefs.getInt(KEY_PORT, DEFAULT_PORT)) {
         if (server != null) return
@@ -203,16 +200,21 @@ class LinkHubRemoteControl(val service: MusicService) {
         if (q.isBlank()) { respond(ex, 400, """{"error":"missing q"}"""); return }
         scope.launch {
             val result = YouTube.search(q, YouTube.SearchFilter.FILTER_SONG)
-            val songs = result.getOrNull()?.songs.orEmpty().take(20).map { s ->
-                mapOf(
-                    "videoId" to s.id,
-                    "title" to s.title,
-                    "artist" to s.artists.firstOrNull()?.name ?: "",
-                    "album" to (s.album?.name ?: ""),
-                    "duration" to (s.duration ?: 0),
-                    "thumbnail" to s.thumbnail,
-                )
-            }
+            val songs = result.getOrNull()
+                ?.items
+                ?.filterIsInstance<com.metrolist.innertube.models.SongItem>()
+                .orEmpty()
+                .take(20)
+                .map { s ->
+                    mapOf(
+                        "videoId" to s.id,
+                        "title" to s.title,
+                        "artist" to s.artists.firstOrNull()?.name ?: "",
+                        "album" to (s.album?.name ?: ""),
+                        "duration" to (s.duration ?: 0),
+                        "thumbnail" to s.thumbnail,
+                    )
+                }
             val json = songs.joinToString(",", "[", "]") { item ->
                 item.entries.joinToString(",", "{", "}") { (k, v) -> "\"$k\":${jsonVal(v)}" }
             }
@@ -233,10 +235,10 @@ class LinkHubRemoteControl(val service: MusicService) {
             try {
                 val q = YouTube.queue(listOf(vid), null).getOrThrow()
                 val first = q.firstOrNull()
-                val metadata: MediaMetadata? = first?.toMediaMetadataCompat()
+                val metadata: MediaMetadata? = first?.toMediaMetadata()
                 withContext(Dispatchers.Main) {
                     if (addToQueue) {
-                        val item = metadata?.toMediaItemCompat() ?: return@withContext
+                        val item = metadata?.toMediaItem() ?: return@withContext
                         service.addToQueue(listOf(item))
                     } else {
                         service.playQueue(
@@ -297,18 +299,4 @@ class LinkHubRemoteControl(val service: MusicService) {
     }
 
     fun destroy() { scope.cancel() }
-}
-
-/** MediaMetadata → MediaItem: käytä projektin omaa funktiota (extensions). */
-private fun MediaMetadata.toMediaItemCompat() = this.toMediaItem()
-
-private fun com.metrolist.innertube.models.YTItem.toMediaMetadataCompat(): MediaMetadata? {
-    if (this !is com.metrolist.innertube.models.SongItem) return null
-    return MediaMetadata(
-        id = id,
-        title = title,
-        artists = artists.map { com.metrolist.music.models.Artist(name = it.name) },
-        duration = duration ?: -1,
-        thumbnailUrl = thumbnail,
-    )
 }
