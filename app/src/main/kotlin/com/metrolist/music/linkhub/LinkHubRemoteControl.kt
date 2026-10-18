@@ -72,7 +72,7 @@ class LinkHubRemoteControl(val service: MusicService) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var server: HttpServer? = null
     private val prefs: SharedPreferences = service.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val token: String = getOrCreateToken(service)
+    private val token: String = prefs.getString("token", null) ?: getOrCreateToken(service)
 
     /** Suora pääsy toistimeen — MusicService.player on lateinit ExoPlayer. */
     private val player get() = service.player

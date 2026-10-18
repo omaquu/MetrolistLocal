@@ -47,6 +47,10 @@ android {
         buildCommit?.let { versionName = "$baseVersionName+$it" }
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
 
+        // MetrolistLinkHub — build-date updateria varten
+        val buildDate = java.time.LocalDate.now().toString()
+        buildConfigField("String", "LINKHUB_BUILD_DATE", "\"$buildDate\"")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
