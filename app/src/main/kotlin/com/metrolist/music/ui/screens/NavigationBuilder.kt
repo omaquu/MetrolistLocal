@@ -408,6 +408,10 @@ fun NavGraphBuilder.navigationBuilder(
         AboutScreen(navController)
     }
 
+    composable("settings/linkhub_remote") {
+        com.metrolist.music.ui.screens.settings.LinkHubRemoteScreen(navController)
+    }
+
     composable("login") {
         LoginScreen(navController)
     }

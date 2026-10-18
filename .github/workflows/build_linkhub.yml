@@ -1,0 +1,90 @@
+name: Build MetrolistLinkHub APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "README.md"
+      - "fastlane/**"
+      - "assets/**"
+      - ".github/**/*.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linkhub-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_foss_debug:
+    name: Build signed debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-cleanup: on-success
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # Pysyvä debug-keystore: sama allekirjoitus jokaisessa buildissa →
+      # päivitys asentuu vanhan päälle ilman uudelleenasennusta.
+      - name: Restore persistent debug keystore
+        env:
+          DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE" ]; then
+            echo "$DEBUG_KEYSTORE" | base64 -d > ./app/persistent-debug.keystore
+          else
+            # Ei secretiä: generoi kertaluontoinen ja tallenna artefaktiin
+            keytool -genkeypair -v -keystore ./app/persistent-debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -dname "CN=MetrolistLinkHub Debug, OU=Pina, O=Hermes, C=FI"
+          fi
+
+      - name: Build FOSS Debug APK (LinkHub Remote mukana)
+        run: ./gradlew --console=plain assembleFossDebug --warning-mode summary
+        env:
+          METROLIST_APPLICATION_ID: fi.pina.metrolistlinkhub
+          METROLIST_APP_NAME: MetrolistLinkHub
+          METROLIST_BUILD_COMMIT: ${{ github.sha }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: MetrolistLinkHub-debug-apk
+          path: app/build/outputs/apk/foss/debug/*.apk
+
+      - name: Release to "latest" tag (suora latauslinkki)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=$(find app/build/outputs/apk/foss/debug -name '*.apk' | head -1)
+          [ -z "$APK" ] && echo "no apk" && exit 1
+          # Pysyvä keystore talteen (jos generoitiin uusi)
+          if [ -f ./app/persistent-debug.keystore ] && [ -n "$GH_TOKEN" ]; then
+            gh release delete keystore --yes --cleanup-tag 2>/dev/null || true
+            gh release create keystore ./app/persistent-debug.keystore \
+              --title "Persistent debug keystore" --notes "Lataa tästä keystore uutta workflow-runia varten (base64: base64 -w0 persistent-debug.keystore)" 2>/dev/null || true
+          fi
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest "$APK" \
+            --title "MetrolistLinkHub latest" \
+            --notes "Automaattinen build $(date -u +%Y-%m-%d) — commit ${{ github.sha }}"

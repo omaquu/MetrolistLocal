@@ -294,6 +294,9 @@ class MusicService :
     @Inject
     lateinit var listenTogetherManager: com.metrolist.music.listentogether.ListenTogetherManager
 
+    /** LinkHub Remote Control (oma fork) — alustetaan onCreate:ssa jos käytössä. */
+    var linkHubRemote: com.metrolist.music.linkhub.LinkHubRemoteControl? = null
+
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
     private var lastAudioFocusState = AudioManager.AUDIOFOCUS_NONE
@@ -607,6 +610,17 @@ class MusicService :
         super.onCreate()
         isRunning = true
         shutdownDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+        // LinkHub Remote Control — HTTP-ohjaus LinkHub-dashboardilta (aina päällä forkkissa)
+        try {
+            if (linkHubRemote == null) linkHubRemote = LinkHubRemoteControl(this)
+            linkHubRemote?.start()
+            // Merkitse että remote on käytetty — pysyy päällä uudelleenkäynnistyksissä
+            getSharedPreferences("linkhub_remote", MODE_PRIVATE)
+                .edit().putBoolean("enabled", true).apply()
+        } catch (t: Throwable) {
+            Timber.tag("LinkHubRemote").e(t, "onCreate: remote start failed")
+        }
 
         setListener(
             object : MediaSessionService.Listener {
@@ -4256,6 +4270,9 @@ class MusicService :
 
     override fun onDestroy() {
         isRunning = false
+
+        // LinkHub Remote Control — pysäytä HTTP-palvelin
+        try { linkHubRemote?.stop() } catch (_: Throwable) {}
 
         if (!::player.isInitialized) {
             try {

@@ -228,6 +228,13 @@ fun SettingsScreen(
                 )
                 add(
                     Material3SettingsItem(
+                        icon = painterResource(R.drawable.link),
+                        title = { Text("LinkHub Remote") },
+                        onClick = { navController.navigate("settings/linkhub_remote") }
+                    )
+                )
+                add(
+                    Material3SettingsItem(
                         icon = painterResource(R.drawable.info),
                         title = { Text(stringResource(R.string.about)) },
                         onClick = { navController.navigate("settings/about") }
