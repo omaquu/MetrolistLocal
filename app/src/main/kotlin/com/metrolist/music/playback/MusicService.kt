@@ -4441,6 +4441,11 @@ class MusicService :
         }
 
         when (intent?.action) {
+            // MetrolistLinkHub: appi käynnistyi — varmista remote päällä (ei toistoa)
+            "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE" -> {
+                // remote startaa onCreate:ssa; ei tarvita toista toimintoa
+            }
+
             ACTION_ALARM_TRIGGER -> {
                 handleAlarmTrigger(intent)
             }

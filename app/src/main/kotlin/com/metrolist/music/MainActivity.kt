@@ -399,6 +399,10 @@ class MainActivity : FragmentActivity() {
         // Initialize Listen Together manager
         listenTogetherManager.initialize()
 
+        // MetrolistLinkHub: herätä MusicService heti appin käynnistyessä,
+        // jotta LinkHub Remote (portti 8875) kuuntelee vaikka toistoa ei ole vielä aloitettu.
+        com.metrolist.music.linkhub.LinkHubRemoteBootstrap.ensureRemoteRunning(this)
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             val locale =
                 dataStore[AppLanguageKey]
