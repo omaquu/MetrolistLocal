@@ -1,5 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.Properties
 
 val localProperties = Properties()
@@ -49,8 +51,8 @@ android {
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
 
         // MetrolistLinkHub — build-aikaleima updateria varten (ISO-8601 UTC sekunneilla)
-        val buildInstant = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(
-            java.time.LocalDateTime.now(java.time.ZoneOffset.UTC)
+        val buildInstant = DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(
+            LocalDateTime.now(ZoneOffset.UTC)
         )
         buildConfigField("String", "LINKHUB_BUILD_INSTANT", "\"$buildInstant\"")
 
