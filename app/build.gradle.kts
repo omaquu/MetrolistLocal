@@ -48,9 +48,11 @@ android {
         buildCommit?.let { versionName = "$baseVersionName+$it" }
         resValue("string", "app_name", appNameOverride ?: "Metrolist")
 
-        // MetrolistLinkHub — build-date updateria varten
-        val buildDate = LocalDate.now().toString()
-        buildConfigField("String", "LINKHUB_BUILD_DATE", "\"$buildDate\"")
+        // MetrolistLinkHub — build-aikaleima updateria varten (ISO-8601 UTC sekunneilla)
+        val buildInstant = java.time.format.DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(
+            java.time.LocalDateTime.now(java.time.ZoneOffset.UTC)
+        )
+        buildConfigField("String", "LINKHUB_BUILD_INSTANT", "\"$buildInstant\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

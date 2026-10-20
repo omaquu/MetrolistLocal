@@ -33,22 +33,22 @@ object LinkHubUpdater {
 
     data class LatestRelease(
         val apkUrl: String,
-        val publishedAt: String,
+        val publishedAt: String,   // ISO-8601 UTC, esim. "2026-10-19T22:46:51Z"
         val sizeBytes: Long,
         val commitSha: String,
     )
 
     /**
-     * Hakee latest-releasen tiedot. Vertaa release-päivämäärää siihen
-     * buildiin jonka sisällä tämä koodi on (BuildConfig.LINKHUB_BUILD_DATE).
-     * Palauttaa releasen jos uusi julkaistu päivämäärä > meidän build-date,
-     * muuten null (= ajan tasalla).
+     * Hakee latest-releasen tiedot. Vertaa release-päivämäärää siihen buildiin
+     * jonka sisällä tämä koodi on (BuildConfig.LINKHUB_BUILD_INSTANT).
+     * Verrataan KOKO aikaleimaa (ei pelkkää päivää) — sama-päivä-buildit
+     * eivät näy "ajan tasalla" enää.
      */
     suspend fun checkForUpdate(): LatestRelease? = withContext(Dispatchers.IO) {
         try {
             val response = client.get(API_LATEST)
             val json = JSONObject(response.bodyAsText())
-            val published = json.getString("published_at") // ISO-8601 Z
+            val published = json.getString("published_at") // esim. 2026-10-19T22:46:51Z
             val assets = json.getJSONArray("assets")
             var apkUrl: String? = null
             var size = 0L
@@ -60,22 +60,21 @@ object LinkHubUpdater {
                     break
                 }
             }
-            val sha = json.getJSONObject("target_commitish").let {
-                // target_commitish on branch-nimi; sha tulee headista — käytä body-hash jos saatavilla
-                json.optString("body", "").lineSequence()
-                    .firstOrNull { it.contains("commit ") }
-                    ?.substringAfter("commit ")?.take(7)
-            } ?: "unknown"
+            val sha = json.optString("body", "").lineSequence()
+                .firstOrNull { it.contains("commit ") }
+                ?.substringAfter("commit ")?.take(7)
+                ?: "unknown"
 
             val url = apkUrl ?: return@withContext null
-            val release = LatestRelease(url, published, size, sha ?: "unknown")
+            val release = LatestRelease(url, published, size, sha)
 
-            // Vertailu: julkaistu-at ISO Z → our build date is UTC yyyy-MM-dd
-            val publishedDate = published.substringBefore('T') // yyyy-MM-dd
-            val builtDate = BuildConfig.LINKHUB_BUILD_DATE    // yyyy-MM-dd
-            Timber.tag(TAG).i("latest release published=%s built=%s", publishedDate, builtDate)
+            // Vertailu ISO-8601 UTC -aikaleimojen merkkijonona:
+            // molemmat muotoa yyyy-MM-ddTHH:mm:ssZ → leksigraafinen vertailu = aikajärjestys
+            val publishedInstant = published.removeSuffix("Z")
+            val builtInstant = BuildConfig.LINKHUB_BUILD_INSTANT.removeSuffix("Z")
+            Timber.tag(TAG).i("latest=%s built=%s", publishedInstant, builtInstant)
 
-            if (publishedDate > builtDate) release else null
+            if (publishedInstant > builtInstant) release else null
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "checkForUpdate failed")
             null
