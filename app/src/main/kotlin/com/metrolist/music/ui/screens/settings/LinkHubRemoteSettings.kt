@@ -31,7 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.metrolist.music.linkhub.LinkHubRemoteControl
+import com.metrolist.music.linkhub.LinkHubRemote
 import com.metrolist.music.linkhub.LinkHubUpdater
 import kotlinx.coroutines.launch
 import java.net.NetworkInterface
@@ -42,9 +42,9 @@ fun LinkHubRemoteSettings() {
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("linkhub_remote", Context.MODE_PRIVATE) }
 
-    var token by remember { mutableStateOf(LinkHubRemoteControl.getOrCreateToken(context)) }
+    var token by remember { mutableStateOf(LinkHubRemote.getOrCreateToken(context)) }
     var port by remember {
-        mutableStateOf(prefs.getInt("port", LinkHubRemoteControl.DEFAULT_PORT).toString())
+        mutableStateOf(prefs.getInt("port", LinkHubRemote.DEFAULT_PORT).toString())
     }
     var tokenDraft by remember { mutableStateOf(token) }
     var portDraft by remember { mutableStateOf(port) }
@@ -102,15 +102,15 @@ fun LinkHubRemoteSettings() {
         OutlinedTextField(
             value = portDraft,
             onValueChange = { portDraft = it.filter { c -> c.isDigit() }.take(5) },
-            label = { Text("Portti (oletus ${LinkHubRemoteControl.DEFAULT_PORT})") },
+            label = { Text("Portti (oletus ${LinkHubRemote.DEFAULT_PORT})") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             var saved by remember { mutableStateOf(false) }
             Button(onClick = {
-                val t = tokenDraft.ifBlank { LinkHubRemoteControl.getOrCreateToken(context) }
-                val p = portDraft.toIntOrNull() ?: LinkHubRemoteControl.DEFAULT_PORT
+                val t = tokenDraft.ifBlank { LinkHubRemote.getOrCreateToken(context) }
+                val p = portDraft.toIntOrNull() ?: LinkHubRemote.DEFAULT_PORT
                 prefs.edit().putString("token", t).putInt("port", p).apply()
                 token = t
                 port = p.toString()

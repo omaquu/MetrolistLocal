@@ -294,9 +294,6 @@ class MusicService :
     @Inject
     lateinit var listenTogetherManager: com.metrolist.music.listentogether.ListenTogetherManager
 
-    /** LinkHub Remote Control (oma fork) — alustetaan onCreate:ssa jos käytössä. */
-    var linkHubRemote: com.metrolist.music.linkhub.LinkHubRemoteControl? = null
-
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
     private var lastAudioFocusState = AudioManager.AUDIOFOCUS_NONE
@@ -613,15 +610,9 @@ class MusicService :
 
         // LinkHub Remote Control — HTTP-ohjaus LinkHub-dashboardilta (aina päällä forkkissa)
         try {
-            if (linkHubRemote == null) {
-                linkHubRemote = com.metrolist.music.linkhub.LinkHubRemoteControl(this)
-            }
-            linkHubRemote?.start()
-            // Merkitse että remote on käytetty — pysyy päällä uudelleenkäynnistyksissä
-            getSharedPreferences("linkhub_remote", MODE_PRIVATE)
-                .edit().putBoolean("enabled", true).apply()
+            com.metrolist.music.linkhub.LinkHubRemote.attach(this)
         } catch (t: Throwable) {
-            Timber.tag("LinkHubRemote").e(t, "onCreate: remote start failed")
+            Timber.tag("LinkHubRemote").e(t, "onCreate: attach failed")
         }
 
         setListener(
@@ -4273,8 +4264,8 @@ class MusicService :
     override fun onDestroy() {
         isRunning = false
 
-        // LinkHub Remote Control — pysäytä HTTP-palvelin
-        try { linkHubRemote?.stop() } catch (_: Throwable) {}
+        // LinkHub Remote — irrota service (palvelin jää päälle appiprosessissa)
+        try { com.metrolist.music.linkhub.LinkHubRemote.detach(this) } catch (_: Throwable) {}
 
         if (!::player.isInitialized) {
             try {
