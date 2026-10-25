@@ -23,6 +23,8 @@ package com.metrolist.music.linkhub
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.os.Handler
+import android.os.Looper
 import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.WatchEndpoint
 import com.metrolist.music.extensions.toMediaItem
@@ -44,7 +46,9 @@ import java.net.Socket
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 object LinkHubRemote {
@@ -198,6 +202,11 @@ object LinkHubRemote {
             }
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "connection handler failed")
+            // Turvaverkko: älä KOSKAAN jätä yhteysripiä vastaamatta —
+            // muuten LinkHub näyttää 'Remote end closed connection without response'
+            try {
+                respond(socket.getOutputStream(), 500, """{"error":"${t.message ?: "internal"}"}""")
+            } catch (_: Exception) {}
         } finally {
             try { socket.close() } catch (_: Exception) {}
         }
@@ -236,17 +245,45 @@ object LinkHubRemote {
 
     // ── Käsittelijät ────────────────────────────────────────────────────────
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Suorita player-operaatio MAIN-THREADILLÄ ja odota tulos (max 3 s).
+     * ExoPlayer EI ole thread-safe — kaikki player-kutsutovat main-threadiltä,
+     * muuten media3 heittää IllegalStateExceptionin ("Player is accessed on the
+     * wrong thread") ja yhteys kuolee ilman vastausta.
+     * Palauttaa null jos service/pelaaja ei saatavilla tai timeout.
+     */
+    private fun <T> onPlayer(block: (androidx.media3.exoplayer.ExoPlayer) -> T): T? {
+        val s = service ?: return null
+        val latch = CountDownLatch(1)
+        val result = arrayOfNulls<Any?>(1)
+        val error = arrayOfNulls<Throwable>(1)
+        mainHandler.post {
+            try {
+                val p = s.player
+                result[0] = block(p)
+            } catch (t: Throwable) {
+                error[0] = t
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(3, TimeUnit.SECONDS)) return null
+        error[0]?.let { throw it }
+        @Suppress("UNCHECKED_CAST")
+        return result[0] as? T
+    }
+
     private fun withPlayer(out: OutputStream, block: (androidx.media3.exoplayer.ExoPlayer) -> Unit) {
         val s = service
         if (s == null) {
             respond(out, 503, """{"error":"player offline - avaa MetrolistLinkHub"}""")
             return
         }
-        val p = try { s.player } catch (t: Throwable) {
-            respond(out, 503, """{"error":"player ei valmis"}""")
-            return
-        }
-        try { block(p) } catch (t: Throwable) {
+        try {
+            onPlayer(block)
+        } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "player op failed")
         }
         respond(out, 200, """{"ok":true}""")
@@ -258,38 +295,45 @@ object LinkHubRemote {
             respond(out, 200, """{"service":false}""")
             return
         }
-        val p = try { s.player } catch (t: Throwable) { null }
-        if (p == null) {
+        val stateJson: String? = try {
+            onPlayer { p ->
+                val sb = StringBuilder("{")
+                sb.append("\"playing\":").append(p.isPlaying)
+                sb.append(",\"position\":").append((p.currentPosition / 1000).toInt())
+                sb.append(",\"duration\":").append((p.duration.coerceAtLeast(0) / 1000).toInt())
+                sb.append(",\"currentIndex\":").append(p.currentMediaItemIndex)
+                sb.append(",\"queueSize\":").append(p.mediaItemCount)
+                sb.append(",\"volume\":").append(p.volume)
+                sb.append(",\"queue\":[")
+                val n = p.mediaItemCount.coerceAtMost(50)
+                for (i in 0 until n) {
+                    val mi = p.getMediaItemAt(i)
+                    sb.append("{\"videoId\":").append(jsonStr(mi.mediaId))
+                    sb.append(",\"title\":").append(jsonStr(mi.mediaMetadata.title?.toString() ?: ""))
+                    sb.append(",\"artist\":").append(jsonStr(mi.mediaMetadata.artist?.toString() ?: ""))
+                    sb.append("}").append(if (i < n - 1) "," else "")
+                }
+                sb.append("]")
+                val cur = p.currentMediaItem
+                if (cur != null) {
+                    sb.append(",\"current\":{")
+                    sb.append("\"videoId\":").append(jsonStr(cur.mediaId))
+                    sb.append(",\"title\":").append(jsonStr(cur.mediaMetadata.title?.toString() ?: ""))
+                    sb.append(",\"artist\":").append(jsonStr(cur.mediaMetadata.artist?.toString() ?: ""))
+                    sb.append("}")
+                }
+                sb.append("}")
+                sb.toString()
+            }
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "state read failed")
+            null
+        }
+        if (stateJson != null) {
+            respond(out, 200, stateJson)
+        } else {
             respond(out, 200, """{"service":true,"player":false}""")
-            return
         }
-        val sb = StringBuilder("{")
-        sb.append("\"playing\":").append(p.isPlaying)
-        sb.append(",\"position\":").append((p.currentPosition / 1000).toInt())
-        sb.append(",\"duration\":").append((p.duration.coerceAtLeast(0) / 1000).toInt())
-        sb.append(",\"currentIndex\":").append(p.currentMediaItemIndex)
-        sb.append(",\"queueSize\":").append(p.mediaItemCount)
-        sb.append(",\"volume\":").append(p.volume)
-        sb.append(",\"queue\":[")
-        val n = p.mediaItemCount.coerceAtMost(50)
-        for (i in 0 until n) {
-            val mi = p.getMediaItemAt(i)
-            sb.append("{\"videoId\":").append(jsonStr(mi.mediaId))
-            sb.append(",\"title\":").append(jsonStr(mi.mediaMetadata.title?.toString() ?: ""))
-            sb.append(",\"artist\":").append(jsonStr(mi.mediaMetadata.artist?.toString() ?: ""))
-            sb.append("}").append(if (i < n - 1) "," else "")
-        }
-        sb.append("]")
-        val cur = p.currentMediaItem
-        if (cur != null) {
-            sb.append(",\"current\":{")
-            sb.append("\"videoId\":").append(jsonStr(cur.mediaId))
-            sb.append(",\"title\":").append(jsonStr(cur.mediaMetadata.title?.toString() ?: ""))
-            sb.append(",\"artist\":").append(jsonStr(cur.mediaMetadata.artist?.toString() ?: ""))
-            sb.append("}")
-        }
-        sb.append("}")
-        respond(out, 200, sb.toString())
     }
 
     private fun jsonStr(v: String?): String =
