@@ -111,11 +111,25 @@ object LinkHubUpdater {
         // Providerin authority: applicationId + ".FileProvider" (ks. AndroidManifest)
         val authority = "${context.packageName}.FileProvider"
         val uri = FileProvider.getUriForFile(context, authority, apk)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
+        // ACTION_INSTALL_PACKAGE (ei ACTION_VIEW) — selkeämpi asennusintent,
+        // toimii myös Android 10+ ilman pakettiasentajan välitystä
+        val intent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        context.startActivity(intent)
+        try {
+            context.startActivity(intent)
+            Timber.tag(TAG).i("install intent launched for %s", apk.name)
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "install intent failed — fallback ACTION_VIEW")
+            val fallback = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try { context.startActivity(fallback) } catch (t2: Throwable) {
+                Timber.tag(TAG).e(t2, "fallback also failed")
+            }
+        }
     }
 
     /**

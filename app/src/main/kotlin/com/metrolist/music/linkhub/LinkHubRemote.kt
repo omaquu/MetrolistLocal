@@ -347,32 +347,38 @@ object LinkHubRemote {
             respond(out, 400, """{"error":"missing q"}""")
             return
         }
-        scope.launch {
-            try {
-                val result = YouTube.search(q, YouTube.SearchFilter.FILTER_SONG)
-                val songs = result.getOrNull()
-                    ?.items
-                    ?.filterIsInstance<com.metrolist.innertube.models.SongItem>()
-                    .orEmpty()
-                    .take(20)
-                val sb = StringBuilder("[")
-                songs.forEachIndexed { i, s ->
-                    sb.append("{")
-                    sb.append("\"videoId\":").append(jsonStr(s.id))
-                    sb.append(",\"title\":").append(jsonStr(s.title))
-                    sb.append(",\"artist\":").append(jsonStr(s.artists.firstOrNull()?.name))
-                    sb.append(",\"album\":").append(jsonStr(s.album?.name))
-                    sb.append(",\"duration\":").append(s.duration ?: 0)
-                    sb.append(",\"thumbnail\":").append(jsonStr(s.thumbnail))
-                    sb.append("}").append(if (i < songs.size - 1) "," else "")
+        Timber.tag(TAG).i("search: %s", q)
+        val results = try {
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.IO) {
+                    kotlinx.coroutines.withTimeoutOrNull(20000L) {
+                        YouTube.search(q, YouTube.SearchFilter.FILTER_SONG).getOrNull()
+                    }
                 }
-                sb.append("]")
-                respond(out, 200, sb.toString())
-            } catch (t: Throwable) {
-                Timber.tag(TAG).e(t, "search failed")
-                respond(out, 500, """{"error":"haku epaonnistui"}""")
             }
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "search exception: %s", q)
+            null
         }
+        val songs = results
+            ?.items
+            ?.filterIsInstance<com.metrolist.innertube.models.SongItem>()
+            .orEmpty()
+            .take(20)
+        Timber.tag(TAG).i("search '%s' → %d osumaa", q, songs.size)
+        val sb = StringBuilder("[")
+        songs.forEachIndexed { i, s ->
+            sb.append("{")
+            sb.append("\"videoId\":").append(jsonStr(s.id))
+            sb.append(",\"title\":").append(jsonStr(s.title))
+            sb.append(",\"artist\":").append(jsonStr(s.artists.firstOrNull()?.name))
+            sb.append(",\"album\":").append(jsonStr(s.album?.name))
+            sb.append(",\"duration\":").append(s.duration ?: 0)
+            sb.append(",\"thumbnail\":").append(jsonStr(s.thumbnail))
+            sb.append("}").append(if (i < songs.size - 1) "," else "")
+        }
+        sb.append("]")
+        respond(out, 200, sb.toString())
     }
 
     private fun handlePlay(out: OutputStream, body: String, addToQueue: Boolean) {
@@ -381,25 +387,35 @@ object LinkHubRemote {
             respond(out, 400, """{"error":"need videoId or youtube url"}""")
             return
         }
-        scope.launch {
-            try {
-                val queue = YouTube.queue(listOf(videoId), null).getOrThrow()
-                val first = queue.firstOrNull()
-                val metadata: MediaMetadata? = first?.toMediaMetadata()
-                var serviceWasDown = false
-                withContext(Dispatchers.Main) {
-                    val s = service
-                    if (s == null) {
-                        serviceWasDown = true
-                        appContext?.let {
-                            val intent = Intent(it, MusicService::class.java)
-                            intent.action = "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE"
-                            try { it.startForegroundService(intent) } catch (t: Throwable) {
-                                Timber.tag(TAG).e(t, "service start failed")
-                            }
-                        }
-                        return@withContext
+        Timber.tag(TAG).i("play/queue: %s (addToQueue=%s)", videoId, addToQueue)
+        val metadata: MediaMetadata? = try {
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.IO) {
+                    kotlinx.coroutines.withTimeoutOrNull(20000L) {
+                        YouTube.queue(listOf(videoId), null).getOrNull()?.firstOrNull()?.toMediaMetadata()
                     }
+                }
+            }
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "metadata resolve failed: %s", videoId)
+            null
+        }
+        try {
+            val s = service
+            if (s == null) {
+                // Service ei päällä → käynnistä ja kerro että retry
+                appContext?.let {
+                    val intent = Intent(it, MusicService::class.java)
+                    intent.action = "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE"
+                    try { it.startForegroundService(intent) } catch (t: Throwable) {
+                        Timber.tag(TAG).e(t, "service start failed")
+                    }
+                }
+                respond(out, 503, """{"error":"soitin kaynnistyy - yrita uudelleen 5 s paasta"}""")
+                return
+            }
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.Main) {
                     if (addToQueue) {
                         val item = metadata?.toMediaItem() ?: return@withContext
                         s.addToQueue(listOf(item))
@@ -407,15 +423,11 @@ object LinkHubRemote {
                         s.playQueue(YouTubeQueue(WatchEndpoint(videoId = videoId), metadata), playWhenReady = true)
                     }
                 }
-                if (serviceWasDown) {
-                    respond(out, 503, """{"error":"soitin kaynnistyy - yrita uudelleen 5 s paasta"}""")
-                } else {
-                    respond(out, 200, """{"ok":true,"queued":$addToQueue,"videoId":"$videoId"}""")
-                }
-            } catch (t: Throwable) {
-                Timber.tag(TAG).e(t, "play failed for %s", videoId)
-                respond(out, 500, """{"error":"${t.message ?: "resolve failed"}"}""")
             }
+            respond(out, 200, """{"ok":true,"queued":$addToQueue,"videoId":"$videoId"}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "play failed for %s", videoId)
+            respond(out, 500, """{"error":"${t.message ?: "resolve failed"}"}""")
         }
     }
 
