@@ -198,6 +198,55 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/seek" -> handleSeek(out, body)
                 method == "POST" && pathOnly == "/volume" -> handleVolume(out, body)
                 method == "POST" && pathOnly == "/stop" -> withPlayer(out) { p -> p.stop() }
+                // ── Extensions: playlistit, albumit, toistomoodit ──
+                method == "GET" && pathOnly == "/playlist" -> respond(out, 200,
+                    LinkHubRemoteExtensions.getPlaylist(rawPath.substringAfter("id=", "").substringBefore('&'))
+                )
+                method == "POST" && pathOnly == "/playlist/play" -> {
+                    val bodyMap = parseBodyMap(body)
+                    respond(out, 200, LinkHubRemoteExtensions.playPlaylist(
+                        service,
+                        bodyMap["playlistId"] ?: "",
+                        bodyMap["shuffle"] == "true",
+                        bodyMap["videoId"],
+                    ))
+                }
+                method == "POST" && pathOnly == "/playlist/queue" -> {
+                    val bodyMap = parseBodyMap(body)
+                    respond(out, 200, LinkHubRemoteExtensions.queuePlaylist(
+                        service,
+                        bodyMap["playlistId"] ?: "",
+                        bodyMap["max"]?.toIntOrNull() ?: 20,
+                    ))
+                }
+                method == "GET" && pathOnly == "/moods" -> respond(out, 200, LinkHubRemoteExtensions.getMoodAndGenres())
+                method == "GET" && pathOnly == "/mood/playlists" -> respond(out, 200,
+                    LinkHubRemoteExtensions.getMoodPlaylists(
+                        rawPath.substringAfter("browseId=", "").substringBefore('&'),
+                        rawPath.substringAfter("params=", "").substringBefore('&').ifBlank { null },
+                    )
+                )
+                method == "POST" && pathOnly == "/album/play" -> {
+                    val bodyMap = parseBodyMap(body)
+                    respond(out, 200, LinkHubRemoteExtensions.playAlbum(
+                        service,
+                        bodyMap["browseId"] ?: "",
+                        bodyMap["shuffle"] == "true",
+                    ))
+                }
+                // Toisto-tilat
+                method == "POST" && pathOnly == "/repeat" -> withPlayer(out) { p ->
+                    // 0 = OFF, 1 = ONE, 2 = ALL (media3 RepeatMode)
+                    val mode = when (extractStr(body, "mode") ?: body.trim()) {
+                        "one" -> 1; "all" -> 2; "off" -> 0
+                        else -> when (p.repeatMode) { 2 -> 0; 1 -> 2; else -> 1 } // cycle off→all→one
+                    }
+                    p.repeatMode = mode
+                }
+                method == "POST" && pathOnly == "/shuffle" -> withPlayer(out) { p ->
+                    val on = extractStr(body, "on") ?: ""
+                    p.shuffleModeEnabled = when (on) { "true" -> true; "false" -> false; else -> !p.shuffleModeEnabled }
+                }
                 else -> respond(out, 404, """{"error":"not found"}""")
             }
         } catch (t: Throwable) {
@@ -210,6 +259,17 @@ object LinkHubRemote {
         } finally {
             try { socket.close() } catch (_: Exception) {}
         }
+    }
+
+    private fun parseBodyMap(body: String): Map<String, String> {
+        val map = HashMap<String, String>()
+        Regex("\"(\\w+)\"\\s*:\\s*\"([^\"]*)\"").findAll(body).forEach { m ->
+            map[m.groupValues[1]] = m.groupValues[2]
+        }
+        Regex("\"(\\w+)\"\\s*:\\s*(true|false)").findAll(body).forEach { m ->
+            map[m.groupValues[1]] = m.groupValues[2]
+        }
+        return map
     }
 
     private fun readLine(input: BufferedInputStream): String? {
