@@ -126,7 +126,7 @@ object LinkHubRemoteExtensions {
                         sb.append("{")
                         sb.append("\"browseId\":").append(jsonStr(item.id))
                         sb.append(",\"title\":").append(jsonStr(item.title))
-                        sb.append(",\"author\":").append(jsonStr(item.authors?.firstOrNull()?.name))
+                        sb.append(",\"author\":").append(jsonStr(item.artists?.firstOrNull()?.name))
                         sb.append(",\"thumbnail\":").append(jsonStr(item.thumbnail))
                         sb.append(",\"type\":\"album\"}")
                         any = true
