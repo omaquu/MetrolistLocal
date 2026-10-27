@@ -364,8 +364,10 @@ object LinkHubRemote {
                 sb.append(",\"currentIndex\":").append(p.currentMediaItemIndex)
                 sb.append(",\"queueSize\":").append(p.mediaItemCount)
                 sb.append(",\"volume\":").append(p.volume)
+                sb.append(",\"shuffle\":").append(p.shuffleModeEnabled)
+                sb.append(",\"repeat\":").append(p.repeatMode)
                 sb.append(",\"queue\":[")
-                val n = p.mediaItemCount.coerceAtMost(50)
+                val n = p.mediaItemCount.coerceAtMost(200)
                 for (i in 0 until n) {
                     val mi = p.getMediaItemAt(i)
                     sb.append("{\"videoId\":").append(jsonStr(mi.mediaId))
