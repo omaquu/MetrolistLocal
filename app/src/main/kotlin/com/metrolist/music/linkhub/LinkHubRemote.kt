@@ -198,6 +198,21 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/seek" -> handleSeek(out, body)
                 method == "POST" && pathOnly == "/volume" -> handleVolume(out, body)
                 method == "POST" && pathOnly == "/stop" -> withPlayer(out) { p -> p.stop() }
+                // ── Jonon valinta: hyppää tiettyyn biisiin jonossa ──
+                method == "POST" && pathOnly == "/queue/select" -> {
+                    val idx = extractNum(body, "index")?.toInt()
+                    if (idx == null || idx < 0) {
+                        respond(out, 400, """{"error":"need index (0-based)"}""")
+                    } else {
+                        withPlayer(out) { p ->
+                            if (idx < p.mediaItemCount) {
+                                p.seekTo(idx, 0L)
+                                p.prepare()
+                                p.playWhenReady = true
+                            }
+                        }
+                    }
+                }
                 // ── Extensions: playlistit, albumit, toistomoodit ──
                 method == "GET" && pathOnly == "/playlist" -> respond(out, 200,
                     LinkHubRemoteExtensions.getPlaylist(rawPath.substringAfter("id=", "").substringBefore('&'))
