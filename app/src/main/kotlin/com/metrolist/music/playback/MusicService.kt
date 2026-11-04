@@ -474,6 +474,10 @@ class MusicService :
     // Tracks the original queue size to distinguish original items from auto-added ones
     private var originalQueueSize: Int = 0
 
+    // LinkHub !SR / user-requested MediaItems, in arrival order, so addToQueueFront can
+    // insert each new request after the last still-pending one (preserving request order).
+    private val userRequestedItems = mutableListOf<MediaItem>()
+
     private var consecutivePlaybackErr = 0
     private var retryJob: Job? = null
     private var retryCount = 0
@@ -2128,22 +2132,7 @@ class MusicService :
     }
 
     fun addToQueue(items: List<MediaItem>) {
-        if (dataStore.get(PreventDuplicateTracksInQueueKey, false)) {
-            val itemIds = items.map { it.mediaId }.toSet()
-            val indicesToRemove = mutableListOf<Int>()
-            val currentIndex = player.currentMediaItemIndex
-
-            for (i in 0 until player.mediaItemCount) {
-                if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
-                    indicesToRemove.add(i)
-                }
-            }
-
-            // Remove from highest index to lowest to maintain index stability
-            indicesToRemove.sortedDescending().forEach { index ->
-                player.removeMediaItem(index)
-            }
-        }
+        removeDuplicateQueueItems(items)
 
         player.addMediaItems(items)
         if (player.shuffleModeEnabled) {
@@ -2151,6 +2140,71 @@ class MusicService :
             applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
         }
         player.prepare()
+    }
+
+    /**
+     * LinkHub !SR: insert user requests at the FRONT of the queue (right after the current
+     * song) instead of the tail, so they always play next — the auto-radio tail never
+     * outranks a request. Requests keep their arrival order: each new one goes after the
+     * previous still-pending request, ahead of everything auto-added.
+     * shortcut: matches pending requests by mediaId identity, which is enough for the
+     * LinkHub remote (same item object tracked until it plays).
+     */
+    fun addToQueueFront(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+
+        removeDuplicateQueueItems(items)
+
+        if (player.mediaItemCount == 0 || player.playbackState == STATE_IDLE) {
+            player.setMediaItems(items)
+            player.prepare()
+            player.playWhenReady = true
+            userRequestedItems.addAll(items)
+            return
+        }
+
+        userRequestedItems.addAll(items)
+
+        // Pending requests sit contiguously right after the current song; walk past them so
+        // this request lands after the earlier ones (FIFO) but ahead of the auto-radio tail.
+        val pendingIds = userRequestedItems.mapTo(HashSet()) { it.mediaId }
+        val currentIndex = player.currentMediaItemIndex
+        var insertAt = currentIndex + 1
+        while (insertAt < player.mediaItemCount && player.getMediaItemAt(insertAt).mediaId in pendingIds) {
+            insertAt++
+        }
+
+        player.addMediaItems(insertAt, items)
+        if (player.shuffleModeEnabled) {
+            applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, dataStore.get(ShufflePlaylistFirstKey, false))
+        }
+        player.prepare()
+    }
+
+    private fun playerContains(mediaId: String): Boolean {
+        for (i in 0 until player.mediaItemCount) {
+            if (player.getMediaItemAt(i).mediaId == mediaId) return true
+        }
+        return false
+    }
+
+    /** Drop queue duplicates of [items] when the user has that protection enabled. */
+    private fun removeDuplicateQueueItems(items: List<MediaItem>) {
+        if (!dataStore.get(PreventDuplicateTracksInQueueKey, false)) return
+        val itemIds = items.map { it.mediaId }.toSet()
+        val currentIndex = player.currentMediaItemIndex
+        val indicesToRemove = mutableListOf<Int>()
+
+        for (i in 0 until player.mediaItemCount) {
+            if (i != currentIndex && player.getMediaItemAt(i).mediaId in itemIds) {
+                indicesToRemove.add(i)
+            }
+        }
+
+        // Remove from highest index to lowest to maintain index stability
+        indicesToRemove.sortedDescending().forEach { index ->
+            player.removeMediaItem(index)
+        }
     }
 
     fun toggleLibrary() {
@@ -2522,6 +2576,11 @@ class MusicService :
             }
         }
         lastTransitionedMediaId = mediaItem?.mediaId
+        // Drop LinkHub requests that already played or were removed, so only the pending
+        // ones (used as the FIFO insert anchor in addToQueueFront) remain.
+        if (userRequestedItems.isNotEmpty()) {
+            userRequestedItems.removeAll { !playerContains(it.mediaId) }
+        }
         initialBufferRecoveryJob?.cancel()
         initialBufferRecoveryJob = null
         initialBufferRecoveryAttemptedMediaId = null
@@ -2584,6 +2643,7 @@ class MusicService :
 
         if (cachedAutoLoadMore &&
             reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
+            player.mediaItemCount < MAX_QUEUE_ITEMS &&
             player.mediaItemCount - player.currentMediaItemIndex <= 5 &&
             currentQueue.hasNextPage() &&
             !(cachedDisableLoadMoreWhenRepeatAll && player.repeatMode == REPEAT_MODE_ALL)
@@ -5060,6 +5120,9 @@ class MusicService :
         const val PERSISTENT_AUTOMIX_FILE = "persistent_automix.data"
         const val PERSISTENT_PLAYER_STATE_FILE = "persistent_player_state.data"
         const val MAX_CONSECUTIVE_ERR = 5
+        // Radio/auto-load-more tail cap: the queue otherwise grows without bound while the
+        // app stays open (each track loads more), which is what eventually kills long sessions.
+        const val MAX_QUEUE_ITEMS = 300
         const val MAX_RETRY_COUNT = 10
 
         private const val INITIAL_BUFFER_RECOVERY_DELAY_MS = 15_000L

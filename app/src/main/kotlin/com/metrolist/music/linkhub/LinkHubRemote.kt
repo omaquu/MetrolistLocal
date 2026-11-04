@@ -192,6 +192,8 @@ object LinkHubRemote {
                 method == "GET" && pathOnly == "/search" -> handleSearch(out, rawPath)
                 method == "POST" && pathOnly == "/play" -> handlePlay(out, body, addToQueue = false)
                 method == "POST" && pathOnly == "/queue" -> handlePlay(out, body, addToQueue = true)
+                // !SR-tyyppinen pyyntö: ajaa jonon keulaan (heti nykyisen perään), ei häntään
+                method == "POST" && pathOnly == "/queue/front" -> handlePlay(out, body, addToQueue = true, front = true)
                 method == "POST" && pathOnly == "/toggle" -> withPlayer(out) { p -> if (p.isPlaying) p.pause() else p.play() }
                 method == "POST" && pathOnly == "/next" -> withPlayer(out) { p -> p.seekToNext() }
                 method == "POST" && pathOnly == "/previous" -> withPlayer(out) { p -> p.seekToPrevious() }
@@ -458,7 +460,7 @@ object LinkHubRemote {
         respond(out, 200, sb.toString())
     }
 
-    private fun handlePlay(out: OutputStream, body: String, addToQueue: Boolean) {
+    private fun handlePlay(out: OutputStream, body: String, addToQueue: Boolean, front: Boolean = false) {
         val videoId = extractStr(body, "videoId") ?: extractStr(body, "url")?.let { parseVideoId(it) }
         if (videoId.isNullOrBlank()) {
             respond(out, 400, """{"error":"need videoId or youtube url"}""")
@@ -495,7 +497,7 @@ object LinkHubRemote {
                 withContext(Dispatchers.Main) {
                     if (addToQueue) {
                         val item = metadata?.toMediaItem() ?: return@withContext
-                        s.addToQueue(listOf(item))
+                        if (front) s.addToQueueFront(listOf(item)) else s.addToQueue(listOf(item))
                     } else {
                         s.playQueue(YouTubeQueue(WatchEndpoint(videoId = videoId), metadata), playWhenReady = true)
                     }

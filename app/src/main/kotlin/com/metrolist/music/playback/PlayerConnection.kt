@@ -317,6 +317,22 @@ class PlayerConnection(
         }
     }
 
+    fun addToQueueFront(item: MediaItem) = addToQueueFront(listOf(item))
+
+    fun addToQueueFront(items: List<MediaItem>) {
+        // Block if Listen Together guest (unless internal sync)
+        if (!allowInternalSync && shouldBlockPlaybackChanges?.invoke() == true) {
+            Timber.tag("PlayerConnection").d("addToQueueFront blocked - Listen Together guest")
+            return
+        }
+        try {
+            service.addToQueueFront(items)
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Error in addToQueueFront")
+            throw e
+        }
+    }
+
     fun toggleLike() {
         try {
             service.toggleLike()
