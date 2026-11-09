@@ -1,0 +1,18 @@
+name: Perm test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  read_job:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "read ok"
+  write_job:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - run: echo "write ok"
