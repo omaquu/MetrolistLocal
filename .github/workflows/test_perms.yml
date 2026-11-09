@@ -1,16 +1,23 @@
 name: Perm test
 
 on:
+  push:
+    branches: ["pina/perm-test"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   read_job:
+    name: read job
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - run: echo "read ok"
   write_job:
+    name: write job
     runs-on: ubuntu-latest
     permissions:
       contents: write
