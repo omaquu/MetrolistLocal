@@ -1,0 +1,17 @@
+name: MR keytool
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - name: s
+        run: |
+          keytool -genkeypair -v -keystore ./app/persistent-debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10950 \
+            -dname "CN=MetrolistLinkHub Debug, OU=Pina, O=Hermes, C=FI"
