@@ -16,7 +16,10 @@
  *
  * Reitit (Bearer-token paitsi /health):
  *   GET  /health, /state, /search?q=
- *   POST /play, /queue, /toggle, /next, /previous, /seek, /volume, /stop
+ *   POST /play, /queue, /queue/front, /queue/set, /toggle, /next, /previous, /seek, /volume, /stop
+ *
+ * /queue/set (LinkHub-jono): korvaa KOKO jonon annetulla järjestetyllä listalla
+ * (ListQueue → EI automaattiradiota). LinkHub omistaa jonon ja työntää sen tänne.
  */
 package com.metrolist.music.linkhub
 
@@ -31,7 +34,9 @@ import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.models.MediaMetadata
 import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.playback.MusicService
+import com.metrolist.music.playback.queues.ListQueue
 import com.metrolist.music.playback.queues.YouTubeQueue
+import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -194,6 +199,8 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/queue" -> handlePlay(out, body, addToQueue = true)
                 // !SR-tyyppinen pyyntö: ajaa jonon keulaan (heti nykyisen perään), ei häntään
                 method == "POST" && pathOnly == "/queue/front" -> handlePlay(out, body, addToQueue = true, front = true)
+                // LinkHub-jono: korvaa koko jono järjestetyllä listalla (ei radiota)
+                method == "POST" && pathOnly == "/queue/set" -> handleQueueSet(out, body)
                 method == "POST" && pathOnly == "/toggle" -> withPlayer(out) { p -> if (p.isPlaying) p.pause() else p.play() }
                 method == "POST" && pathOnly == "/next" -> withPlayer(out) { p -> p.seekToNext() }
                 method == "POST" && pathOnly == "/previous" -> withPlayer(out) { p -> p.seekToPrevious() }
@@ -507,6 +514,96 @@ object LinkHubRemote {
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "play failed for %s", videoId)
             respond(out, 500, """{"error":"${t.message ?: "resolve failed"}"}""")
+        }
+    }
+
+    /**
+     * LinkHub-jono: korvaa koko toistojonon annetulla järjestetyllä listalla.
+     *
+     * Body: {"items":[{"videoId","title","artist","duration","thumbnail"},...],
+     *        "startIndex":0, "play":true, "position":0}
+     *
+     * Rakentaa MediaItemit SUORAAN annetuista tiedoista (ei verkkohakua per biisi)
+     * ja soittaa ListQueue:na → EI automaattiradiota. LinkHub omistaa jonon.
+     * Yksittäisen biisin metatietojen puuttuessa haetaan vain se yksi.
+     */
+    private fun handleQueueSet(out: OutputStream, body: String) {
+        val obj: JSONObject = try {
+            JSONObject(body)
+        } catch (t: Throwable) {
+            JSONObject()
+        }
+        val itemsArr = obj.optJSONArray("items") ?: org.json.JSONArray()
+        if (itemsArr.length() == 0) {
+            respond(out, 400, """{"error":"items vaaditaan"}""")
+            return
+        }
+        val s = service
+        if (s == null) {
+            appContext?.let {
+                val intent = Intent(it, MusicService::class.java)
+                intent.action = "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE"
+                try { it.startForegroundService(intent) } catch (t: Throwable) {
+                    Timber.tag(TAG).e(t, "service start failed")
+                }
+            }
+            respond(out, 503, """{"error":"soitin kaynnistyy - yrita uudelleen 5 s paasta"}""")
+            return
+        }
+
+        val startIndex = obj.optInt("startIndex", 0).coerceAtLeast(0)
+        val play = obj.optBoolean("play", true)
+        val positionSec = obj.optLong("position", 0L)
+
+        try {
+            val metas = ArrayList<MediaMetadata>(itemsArr.length())
+            for (i in 0 until itemsArr.length()) {
+                val o = itemsArr.optJSONObject(i) ?: continue
+                val vid = o.optString("videoId")
+                if (vid.isBlank()) continue
+                val title = o.optString("title")
+                if (title.isNotBlank()) {
+                    // Suoraan annetuista tiedoista — ei verkkokutsua per biisi
+                    metas.add(
+                        MediaMetadata(
+                            id = vid,
+                            title = title,
+                            artists = listOf(MediaMetadata.Artist(id = null, name = o.optString("artist"))),
+                            duration = o.optInt("duration", 0),
+                            thumbnailUrl = o.optString("thumbnail").ifBlank { null },
+                        )
+                    )
+                } else {
+                    // Ei tietoja → hae vain tämä yksi
+                    val md = kotlinx.coroutines.runBlocking {
+                        withContext(Dispatchers.IO) {
+                            kotlinx.coroutines.withTimeoutOrNull(15000L) {
+                                YouTube.queue(listOf(vid), null).getOrNull()?.firstOrNull()?.toMediaMetadata()
+                            }
+                        }
+                    }
+                    if (md != null) metas.add(md)
+                }
+            }
+            if (metas.isEmpty()) {
+                respond(out, 400, """{"error":"ei kelvollisia kappaleita"}""")
+                return
+            }
+            val mediaItems = metas.map { it.toMediaItem() }
+            val si = startIndex.coerceIn(0, mediaItems.size - 1)
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.Main) {
+                    // Korvaa koko jono ListQueuella — ei automaattiradiota
+                    s.playQueue(
+                        ListQueue(title = null, items = mediaItems, startIndex = si, position = positionSec * 1000L),
+                        playWhenReady = play,
+                    )
+                }
+            }
+            respond(out, 200, """{"ok":true,"order":${mediaItems.size},"startIndex":$si}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "queue/set failed")
+            respond(out, 500, """{"error":"${t.message ?: "queue set failed"}"}""")
         }
     }
 
