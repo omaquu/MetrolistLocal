@@ -644,7 +644,7 @@ object LinkHubRemote {
             val added = kotlinx.coroutines.runBlocking {
                 withContext(Dispatchers.Main) {
                     val player = s.player
-                    val seedId = requested ?: player.currentMetadata?.id
+                    val seedId = requested ?: player.currentMediaItem?.mediaId
                     if (seedId.isNullOrBlank()) {
                         throw IllegalStateException("ei biisiä radion seediksi — soita ensin jotain")
                     }
@@ -660,7 +660,7 @@ object LinkHubRemote {
                         // Radio jatkaa jonon HÄNNÄSTÄ: nykyinen SR/lista-järjestys säilyy edessä.
                         player.addMediaItems(itemCount, radioItems)
                     }
-                    initialStatus?.title?.let { queueTitle = it }
+                    initialStatus?.title?.let { s.queueTitle = it }
                     // Merkitse radiolähde, jotta LinkHub näkee tilan.
                     lastRadioSeed = seedId
                     radioItems.size
