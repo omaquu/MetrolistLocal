@@ -68,6 +68,8 @@ object LinkHubRemote {
     @Volatile private var boundPort: Int = DEFAULT_PORT
     @Volatile private var service: MusicService? = null
     @Volatile private var appContext: Context? = null
+    /** Viimeisin RADIO-seed (videoId) — LinkHub näyttää tämän tilassa. */
+    @Volatile var lastRadioSeed: String? = null
     private val running = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val workers = Executors.newFixedThreadPool(4)
@@ -201,6 +203,8 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/queue/front" -> handlePlay(out, body, addToQueue = true, front = true)
                 // LinkHub-jono: korvaa koko jono järjestetyllä listalla (ei radiota)
                 method == "POST" && pathOnly == "/queue/set" -> handleQueueSet(out, body)
+                // RADIO: käynnistä YouTube-radio nykyisestä biisistä (tai annetusta videoId:stä)
+                method == "POST" && pathOnly == "/radio" -> handleRadio(out, body)
                 method == "POST" && pathOnly == "/toggle" -> withPlayer(out) { p -> if (p.isPlaying) p.pause() else p.play() }
                 method == "POST" && pathOnly == "/next" -> withPlayer(out) { p -> p.seekToNext() }
                 method == "POST" && pathOnly == "/previous" -> withPlayer(out) { p -> p.seekToPrevious() }
@@ -408,6 +412,7 @@ object LinkHubRemote {
                     sb.append(",\"artist\":").append(jsonStr(cur.mediaMetadata.artist?.toString() ?: ""))
                     sb.append("}")
                 }
+                sb.append(",\"radioSeed\":").append(radioInfo())
                 sb.append("}")
                 sb.toString()
             }
@@ -420,6 +425,12 @@ object LinkHubRemote {
         } else {
             respond(out, 200, """{"service":true,"player":false}""")
         }
+    }
+
+    /** Onko RADIO aktiivinen (LinkHubin UI näyttää napin tilan). */
+    private fun radioInfo(): String {
+        val seed = lastRadioSeed
+        return if (seed.isNullOrBlank()) "null" else jsonStr(seed)
     }
 
     private fun jsonStr(v: String?): String =
@@ -604,6 +615,61 @@ object LinkHubRemote {
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "queue/set failed")
             respond(out, 500, """{"error":"${t.message ?: "queue set failed"}"}""")
+        }
+    }
+
+    /**
+     * RADIO: käynnistä YouTube-radio nykyisestä biisistä (tai annetusta videoId:stä).
+     *
+     * Body (valinnainen): {"videoId": "..."} — puuttuessa käytetään parhaillaan
+     * soivaa biisiä. Radio lisää samantyyppisiä biisejä jonon hännän TAKAA:
+     * nykyinen SR/lista-järjestys säilyy edessä, radio jatkaa sen jälkeen.
+     */
+    private fun handleRadio(out: OutputStream, body: String) {
+        val s = service
+        if (s == null) {
+            appContext?.let {
+                val intent = Intent(it, MusicService::class.java)
+                intent.action = "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE"
+                try { it.startForegroundService(intent) } catch (t: Throwable) {
+                    Timber.tag(TAG).e(t, "service start failed")
+                }
+            }
+            respond(out, 503, """{"error":"soitin kaynnistyy - yrita uudelleen 5 s paasta"}""")
+            return
+        }
+        val requested = extractStr(body, "videoId")
+        Timber.tag(TAG).i("radio request: %s", requested ?: "nykyinen biisi")
+        try {
+            val added = kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.Main) {
+                    val player = s.player
+                    val seedId = requested ?: player.currentMetadata?.id
+                    if (seedId.isNullOrBlank()) {
+                        throw IllegalStateException("ei biisiä radion seediksi — soita ensin jotain")
+                    }
+                    val itemCount = player.mediaItemCount
+                    val radioQueue = YouTubeQueue(endpoint = WatchEndpoint(videoId = seedId))
+                    val initialStatus = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                        kotlinx.coroutines.withTimeoutOrNull(20000L) { radioQueue.getInitialStatus() }
+                    }
+                    val radioItems = initialStatus?.items
+                        ?.filter { it.mediaId != seedId }
+                        .orEmpty()
+                    if (radioItems.isNotEmpty()) {
+                        // Radio jatkaa jonon HÄNNÄSTÄ: nykyinen SR/lista-järjestys säilyy edessä.
+                        player.addMediaItems(itemCount, radioItems)
+                    }
+                    initialStatus?.title?.let { queueTitle = it }
+                    // Merkitse radiolähde, jotta LinkHub näkee tilan.
+                    lastRadioSeed = seedId
+                    radioItems.size
+                }
+            }
+            respond(out, 200, """{"ok":true,"radio":true,"added":$added,"seed":"${requested ?: ""}"}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "radio failed")
+            respond(out, 500, """{"error":"${t.message ?: "radio failed"}"}""")
         }
     }
 
