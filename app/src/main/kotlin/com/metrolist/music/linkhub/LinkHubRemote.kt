@@ -39,7 +39,10 @@ import com.metrolist.music.playback.queues.YouTubeQueue
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -68,8 +71,17 @@ object LinkHubRemote {
     @Volatile private var boundPort: Int = DEFAULT_PORT
     @Volatile private var service: MusicService? = null
     @Volatile private var appContext: Context? = null
+    @Volatile private var radioMonitor: Job? = null
+
+    /** Radio-tila: onko radio päällä? LinkHubin nappi näyttää tämän. */
+    @Volatile
+    var radioOn: Boolean = false
+        private set
+
     /** Viimeisin RADIO-seed (videoId) — LinkHub näyttää tämän tilassa. */
-    @Volatile var lastRadioSeed: String? = null
+    @Volatile
+    var lastRadioSeed: String? = null
+        private set
     private val running = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val workers = Executors.newFixedThreadPool(4)
@@ -203,8 +215,12 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/queue/front" -> handlePlay(out, body, addToQueue = true, front = true)
                 // LinkHub-jono: korvaa koko jono järjestetyllä listalla (ei radiota)
                 method == "POST" && pathOnly == "/queue/set" -> handleQueueSet(out, body)
+                // Kevyt lisäys nykyisen biisin perään — EI katkaise toistoa, EI koske loppujonoa
+                method == "POST" && pathOnly == "/queue/insert" -> handleQueueInsert(out, body)
                 // RADIO: käynnistä YouTube-radio nykyisestä biisistä (tai annetusta videoId:stä)
                 method == "POST" && pathOnly == "/radio" -> handleRadio(out, body)
+                // RADIO pois: nollaa seed ja lopettaa automaattisen radio-jatkon
+                method == "POST" && pathOnly == "/radio/off" -> handleRadioOff(out)
                 method == "POST" && pathOnly == "/toggle" -> withPlayer(out) { p -> if (p.isPlaying) p.pause() else p.play() }
                 method == "POST" && pathOnly == "/next" -> withPlayer(out) { p -> p.seekToNext() }
                 method == "POST" && pathOnly == "/previous" -> withPlayer(out) { p -> p.seekToPrevious() }
@@ -619,6 +635,74 @@ object LinkHubRemote {
     }
 
     /**
+     * Kevyt lisäys: työntää annetut biisit jonoon annettuun indeksiin asti
+     * KOSKEMATTA nykyiseen toistoon eikä prepare():iin. Käytetään !sr-pyyntöihin,
+     * jotta (a) nykyinen biisi ei katkea ja (b) radion hännän biisit säilyvät.
+     *
+     * Body: {"items":[{"videoId","title","artist","duration","thumbnail"},...],"index":N}
+     * — index puuttuessa lisätään nykyisen biisin perään.
+     */
+    private fun handleQueueInsert(out: OutputStream, body: String) {
+        val s = service
+        if (s == null) {
+            appContext?.let {
+                val intent = Intent(it, MusicService::class.java)
+                intent.action = "com.metrolist.music.linkhub.BOOTSTRAP_REMOTE"
+                try { it.startForegroundService(intent) } catch (t: Throwable) {
+                    Timber.tag(TAG).e(t, "service start failed")
+                }
+            }
+            respond(out, 503, """{"error":"soitin kaynnistyy - yrita uudelleen 5 s paasta"}""")
+            return
+        }
+        val obj: JSONObject = try {
+            JSONObject(body)
+        } catch (t: Throwable) {
+            JSONObject()
+        }
+        val itemsArr = obj.optJSONArray("items") ?: org.json.JSONArray()
+        if (itemsArr.length() == 0) {
+            respond(out, 400, """{"error":"items vaaditaan"}""")
+            return
+        }
+        try {
+            val metas = ArrayList<MediaMetadata>(itemsArr.length())
+            for (i in 0 until itemsArr.length()) {
+                val o = itemsArr.optJSONObject(i) ?: continue
+                val vid = o.optString("videoId")
+                if (vid.isBlank()) continue
+                metas.add(
+                    MediaMetadata(
+                        id = vid,
+                        title = o.optString("title").ifBlank { vid },
+                        artists = listOf(MediaMetadata.Artist(id = null, name = o.optString("artist"))),
+                        duration = o.optInt("duration", 0),
+                        thumbnailUrl = o.optString("thumbnail").ifBlank { null },
+                    )
+                )
+            }
+            if (metas.isEmpty()) {
+                respond(out, 400, """{"error":"ei kelvollisia kappaleita"}""")
+                return
+            }
+            val mediaItems = metas.map { it.toMediaItem() }
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.Main) {
+                    val p = s.player
+                    var idx = obj.optInt("index", p.currentMediaItemIndex + 1)
+                    idx = idx.coerceIn(0, p.mediaItemCount)
+                    // Vain addMediaItems — ei prepare():ia, jotta toisto ei katkea.
+                    p.addMediaItems(idx, mediaItems)
+                }
+            }
+            respond(out, 200, """{"ok":true,"inserted":${mediaItems.size}}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "queue/insert failed")
+            respond(out, 500, """{"error":"${t.message ?: "queue insert failed"}"}""")
+        }
+    }
+
+    /**
      * RADIO: käynnistä YouTube-radio nykyisestä biisistä (tai annetusta videoId:stä).
      *
      * Body (valinnainen): {"videoId": "..."} — puuttuessa käytetään parhaillaan
@@ -649,7 +733,14 @@ object LinkHubRemote {
                         throw IllegalStateException("ei biisiä radion seediksi — soita ensin jotain")
                     }
                     val itemCount = player.mediaItemCount
-                    val radioQueue = YouTubeQueue(endpoint = WatchEndpoint(videoId = seedId))
+                    // RDAMVM = "radio mix" -playlist (ei automix). Sama lähde kuin
+                    // MusicService.startRadioSeamlessly / YouTubeQueue.radio().
+                    val radioQueue = YouTubeQueue(
+                        endpoint = WatchEndpoint(
+                            videoId = seedId,
+                            playlistId = "RDAMVM$seedId",
+                        ),
+                    )
                     val initialStatus = kotlinx.coroutines.withContext(Dispatchers.IO) {
                         kotlinx.coroutines.withTimeoutOrNull(20000L) { radioQueue.getInitialStatus() }
                     }
@@ -661,8 +752,14 @@ object LinkHubRemote {
                         player.addMediaItems(itemCount, radioItems)
                     }
                     initialStatus?.title?.let { s.queueTitle = it }
-                    // Merkitse radiolähde, jotta LinkHub näkee tilan.
+                    // Adoptoi radiojono: kun SR/lista-biisit loppuvat, appin auto-jatko
+                    // (onMediaItemTransition → currentQueue.nextPage()) hakee lisää radiota
+                    // hiljaisuuden sijaan. Radio-monitori täydentää lisää uusimmasta biisistä.
+                    s.adoptQueue(radioQueue, initialStatus?.title, player.mediaItemCount)
+                    // Merkitse radiolähde, jotta LinkHub näkee tilan, ja käynnistä monitori.
                     lastRadioSeed = seedId
+                    radioOn = true
+                    startRadioMonitor()
                     radioItems.size
                 }
             }
@@ -670,6 +767,97 @@ object LinkHubRemote {
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "radio failed")
             respond(out, 500, """{"error":"${t.message ?: "radio failed"}"}""")
+        }
+    }
+
+    /**
+     * Radio-monitori: kun radio on päällä, täydentää jonon häntää aina
+     * VIIMEISIMMÄN SOIVAN biisin perusteella (uusi RDAMVM-radio per täydennys).
+     *
+     * Näin (a) radio ei koskaan kuole SR/lista-biisien lopussa ja (b) uudet
+     * radiobiisit tehdään aina siitä mitä JUST nyt soi — ei alkuperäisestä
+     * vanhentuneesta seedistä. SR-biisit pysyvät aina edellä, koska ne
+     * lisätään /queue/insertillä nykyisen perään, ei häntään.
+     */
+    private fun startRadioMonitor() {
+        radioMonitor?.cancel()
+        radioMonitor = scope.launch {
+            while (isActive && radioOn) {
+                delay(5000)
+                val s = service ?: continue
+                try {
+                    // Tarvitaanko lisää? Jäljellä ≤ 2 biisiä nykyisestä eteenpäin.
+                    val needMore = onPlayer { p ->
+                        p.mediaItemCount - p.currentMediaItemIndex <= 2
+                    } ?: false
+                    if (!needMore) continue
+                    val cur = onPlayer { p -> p.currentMediaItem?.mediaId } ?: continue
+                    val existing = onPlayer { p ->
+                        val set = HashSet<String>(p.mediaItemCount)
+                        for (i in 0 until p.mediaItemCount) set.add(p.getMediaItemAt(i).mediaId)
+                        set
+                    } ?: continue
+                    val added = withContext(Dispatchers.IO) {
+                        val radioQueue = YouTubeQueue(
+                            endpoint = WatchEndpoint(videoId = cur, playlistId = "RDAMVM$cur"),
+                        )
+                        val status = kotlinx.coroutines.withTimeoutOrNull(20000L) {
+                            radioQueue.getInitialStatus()
+                        }
+                        status?.items
+                            ?.filter { it.mediaId != cur && it.mediaId !in existing }
+                            .orEmpty()
+                    }
+                    if (added.isNotEmpty()) {
+                        onPlayer { p -> p.addMediaItems(p.mediaItemCount, added) }
+                        lastRadioSeed = cur
+                        Timber.tag(TAG).i("radio monitor: +%d biisiä seedistä %s", added.size, cur)
+                    }
+                } catch (t: Throwable) {
+                    Timber.tag(TAG).e(t, "radio monitor failed")
+                }
+            }
+        }
+    }
+
+    /**
+     * RADIO pois päältä: nollaa seed ja lopettaa automaattisen radio-jatkon.
+     *
+     * Palauttaa ListQueue-adoptoinnin, jotta jonon lopussa EI haeta uusia
+     * radiobiisejä (normi lista loppuu hiljaa, kuten ennen radiota).
+     * Nykyinen toisto jatkuu keskeytyksettä.
+     */
+    private fun handleRadioOff(out: OutputStream) {
+        val s = service
+        if (s == null) {
+            respond(out, 503, """{"error":"player offline"}""")
+            return
+        }
+        try {
+            // Pysäytä monitori ENSIN, jotta se ei täydennä radiota enää.
+            radioOn = false
+            radioMonitor?.cancel()
+            radioMonitor = null
+            kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.Main) {
+                    val p = s.player
+                    // Kerätään nykyisen jonon biisit ListQueue-adoptointiin.
+                    val items = ArrayList<androidx.media3.common.MediaItem>(p.mediaItemCount)
+                    for (i in 0 until p.mediaItemCount) {
+                        items.add(p.getMediaItemAt(i))
+                    }
+                    s.adoptQueue(
+                        com.metrolist.music.playback.queues.ListQueue(items = items),
+                        null,
+                        items.size,
+                    )
+                }
+            }
+            lastRadioSeed = null
+            respond(out, 200, """{"ok":true,"radio":false}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "radio off failed")
+            respond(out, 500, """{"error":"${t.message ?: "radio off failed"}"}""")
         }
     }
 
