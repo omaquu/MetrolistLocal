@@ -221,6 +221,11 @@ object LinkHubRemote {
                 method == "POST" && pathOnly == "/radio" -> handleRadio(out, body)
                 // RADIO pois: nollaa seed ja lopettaa automaattisen radio-jatkon
                 method == "POST" && pathOnly == "/radio/off" -> handleRadioOff(out)
+                // FAVOURITES: like/unlike biisi appin tietokantaan (liked-kenttä),
+                // GET /song/liked → tykätyt videoId:t (LinkHub näyttää ★-tilan)
+                method == "POST" && pathOnly == "/song/like" -> handleSongLike(out, body, wantLiked = true)
+                method == "POST" && pathOnly == "/song/unlike" -> handleSongLike(out, body, wantLiked = false)
+                method == "GET" && pathOnly == "/song/liked" -> handleLikedIds(out)
                 method == "POST" && pathOnly == "/toggle" -> withPlayer(out) { p -> if (p.isPlaying) p.pause() else p.play() }
                 method == "POST" && pathOnly == "/next" -> withPlayer(out) { p -> p.seekToNext() }
                 method == "POST" && pathOnly == "/previous" -> withPlayer(out) { p -> p.seekToPrevious() }
@@ -429,6 +434,19 @@ object LinkHubRemote {
                     sb.append("}")
                 }
                 sb.append(",\"radioSeed\":").append(radioInfo())
+                sb.append(",\"likedCurrent\":").append(
+                    try {
+                        val cur = p.currentMediaItem?.mediaId
+                        val liked = kotlinx.coroutines.runBlocking {
+                            withContext(Dispatchers.IO) {
+                                cur?.let { s.database.songEntity(it)?.liked } ?: false
+                            }
+                        }
+                        liked
+                    } catch (_: Throwable) {
+                        false
+                    },
+                )
                 sb.append("}")
                 sb.toString()
             }
@@ -858,6 +876,101 @@ object LinkHubRemote {
         } catch (t: Throwable) {
             Timber.tag(TAG).e(t, "radio off failed")
             respond(out, 500, """{"error":"${t.message ?: "radio off failed"}"}""")
+        }
+    }
+
+    /**
+     * FAVOURITES: tykkää/poista tykkäys appin tietokannassa (song.liked).
+     *
+     * Body: {"videoId": "..."} — puuttuessa käytetään parhaillaan soivaa biisiä.
+     * Toimii myös jonon riveiltä: LinkHub lähettää videoId:n.
+     * LIKE:  INSERT OR IGNORE song + liked=true + YouTube-like (jos kirjautunut).
+     * UNLIKE: liked=false (rivi jää — history/playcount säilyy).
+     * JOS biisiä ei ole DB:ssä, se lisätään ensin toMediaMetadata-datalla.
+     */
+    private fun handleSongLike(
+        out: OutputStream,
+        body: String,
+        wantLiked: Boolean,
+    ) {
+        val s = service
+        if (s == null) {
+            respond(out, 503, """{"error":"player offline - avaa MetrolistLinkHub"}""")
+            return
+        }
+        val requested = extractStr(body, "videoId")
+        Timber.tag(TAG).i("song like: %s wantLiked=%s", requested ?: "nykyinen", wantLiked)
+        try {
+            val result = kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.IO) {
+                    val videoId = requested
+                        ?: onPlayer { p -> p.currentMediaItem?.mediaId }
+                        ?: throw IllegalStateException("ei biisiä — anna videoId tai soita ensin")
+                    // Metatiedot: DB:stä, muuten verkkoresolvella (sama kuin /play).
+                    var song = s.database.songEntity(videoId)
+                    var fetched: MediaMetadata? = null
+                    if (song == null) {
+                        fetched =
+                            kotlinx.coroutines.withTimeoutOrNull(15000L) {
+                                YouTube.queue(listOf(videoId), null).getOrNull()?.firstOrNull()?.toMediaMetadata()
+                            }
+                        val md = fetched ?: throw IllegalStateException("metadatan haku epäonnistui")
+                        // INSERT OR IGNORE — ei ylikirjoita olemassa olevaa riviä.
+                        s.database.insert(md.toSongEntity())
+                        song = s.database.songEntity(videoId)
+                    }
+                    val current = song ?: throw IllegalStateException("song-row puuttuu")
+                    val already = current.liked
+                    if (already != wantLiked) {
+                        val updated =
+                            if (wantLiked) {
+                                current.copy(
+                                    liked = true,
+                                    likedDate = java.time.LocalDateTime.now(),
+                                )
+                            } else {
+                                current.copy(
+                                    liked = false,
+                                    likedDate = null,
+                                )
+                            }
+                        s.database.update(updated)
+                        // YouTube-synkka (suspend) — palauttaa Result, ei heitä.
+                        runCatching { YouTube.likeVideo(videoId, wantLiked) }
+                    }
+                    mapOf("videoId" to videoId, "liked" to wantLiked, "changed" to (already != wantLiked))
+                }
+            }
+            val vid = result["videoId"] as? String ?: ""
+            respond(out, 200, """{"ok":true,"liked":$wantLiked,"videoId":"$vid"}""")
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "song like failed")
+            respond(out, 500, """{"error":"${t.message ?: "like failed"}"}""")
+        }
+    }
+
+    /** GET /song/liked → {"ids":[...]} — tykätyt videoId:t (UI:n ★-tilaan). */
+    private fun handleLikedIds(out: OutputStream) {
+        val s = service
+        if (s == null) {
+            respond(out, 200, """{"ids":[]}""")
+            return
+        }
+        try {
+            val ids = kotlinx.coroutines.runBlocking {
+                withContext(Dispatchers.IO) { s.database.likedSongIds() }
+            }
+            val sb = StringBuilder("""{"ids":[""")
+            ids.forEachIndexed { i, id ->
+                if (i > 0) sb.append(",")
+                sb.append(jsonStr(id))
+
+            }
+            sb.append("]}")
+            respond(out, 200, sb.toString())
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "liked ids failed")
+            respond(out, 200, """{"ids":[]}""")
         }
     }
 
